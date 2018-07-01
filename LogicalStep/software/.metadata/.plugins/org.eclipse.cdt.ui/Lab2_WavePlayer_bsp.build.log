@@ -1,0 +1,6 @@
+14:45:03 **** Clean-only build of configuration Nios II for project Lab2_WavePlayer_bsp ****
+make clean 
+[BSP clean complete]
+
+14:45:03 Build Finished (took 390ms)
+

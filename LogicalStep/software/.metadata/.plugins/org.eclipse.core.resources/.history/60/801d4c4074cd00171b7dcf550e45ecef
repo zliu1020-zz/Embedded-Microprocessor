@@ -1,0 +1,296 @@
+/*=========================================================================*/
+/*  Includes                                                               */
+/*=========================================================================*/
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdint.h>
+#include <string.h>
+
+#include <system.h>
+#include <sys/alt_alarm.h>
+#include <io.h>
+
+#include "fatfs.h"
+#include "diskio.h"
+
+#include "ff.h"
+#include "monitor.h"
+#include "uart.h"
+
+#include "alt_types.h"
+
+#include <altera_up_avalon_audio.h>
+#include <altera_up_avalon_audio_and_video_config.h>
+#include "sys/alt_irq.h"
+#include "altera_avalon_pio_regs.h"
+
+
+/*=========================================================================*/
+/*  DEFINE: All Structures and Common Constants                            */
+/*=========================================================================*/
+
+/*=========================================================================*/
+/*  DEFINE: Macros                                                         */
+/*=========================================================================*/
+
+#define PSTR(_a)  _a
+
+/*=========================================================================*/
+/*  DEFINE: Prototypes                                                     */
+/*=========================================================================*/
+
+/*=========================================================================*/
+/*  DEFINE: Definition of all local Data                                   */
+/*=========================================================================*/
+static alt_alarm alarm;
+static unsigned long Systick = 0;
+static volatile unsigned short Timer;   /* 1000Hz increment timer */
+
+
+/*=========================================================================*/
+/*  DEFINE: All code exported                                              */
+/*=========================================================================*/
+/*  Macros to clear the LCD screen. */
+
+#define ESC 27
+#define CLEAR_LCD_STRING "[2J"
+
+uint32_t acc_size;                 /* Work register for fs command */
+uint16_t acc_files, acc_dirs;
+FILINFO Finfo;
+#if _USE_LFN
+char Lfname[512];
+#endif
+
+char Line[256];                 /* Console input buffer */
+FATFS Fatfs[_VOLUMES];          /* File system object for each logical drive */
+FIL File1, File2;               /* File objects */
+DIR Dir;                        /* Directory object */
+uint8_t Buff[512] __attribute__ ((aligned(4)));  /* Working buffer */
+
+FILE* lcd_display; 				//LCD display
+uint8_t res = 0;
+long p1;
+uint32_t s1, s2, cnt, blen = sizeof(Buff);
+uint32_t ofs = 0;
+
+char filename[20][20];
+unsigned long filesize[20];
+int fileorder[20];
+int file_idx;
+
+alt_up_audio_dev * audio_dev;
+
+// 0 = PLAY, 1 = PAUSE, 2 = STOP
+#define PLAY 0
+#define PAUSE 1
+#define STOP 2
+
+/***button states**/
+int state = STOP;
+#define BUTTON_PREVIOUS 7
+#define  BUTTON_STOP  11
+#define  BUTTON_PLAY_PAUSE 13
+#define  BUTTON_NEXT 14
+
+
+
+int is_wav(char* file_name){
+	if(strstr(file_name, ".WAV")!= NULL){
+		return 1;
+	}else{
+		return 0;
+	}
+}
+
+void generate_song_index(){
+
+		char* ptr = "";
+
+		/**Code copied from phase 2 fl function**/
+		res = f_opendir(&Dir, ptr);
+		p1 = s1 = s2 = 0; // otherwise initialize the pointers and proceed.
+		int idx = 0;
+		int order = 0;
+		while (1)
+		{
+			res = f_readdir(&Dir, &Finfo);
+			if ((res != FR_OK) || !Finfo.fname[0])
+				break;
+			if (Finfo.fattrib & AM_DIR)
+			{
+				s2++;
+			}
+			else
+			{
+				s1++;
+				p1 += Finfo.fsize;
+			}
+
+			if(is_wav(&(Finfo.fname[0])) == 1){
+
+				strcpy(filename[idx], &(Finfo.fname[0]));
+				filesize[idx] = Finfo.fsize;
+				fileorder[idx] = order;
+				idx++;
+			}
+
+			order++;
+		}
+}
+
+void display_song(int idx, char* name){
+
+	 if (lcd_display != NULL )
+	 {
+	   /* Send the command sequence to clear the LCD. */
+	   fprintf(lcd_display, "%c%s", ESC, CLEAR_LCD_STRING);
+	   /* Display song */
+	   fprintf(lcd_display, "%d: %s\n", idx, name);
+	 }
+}
+
+void play_song(){
+
+	int current = file_idx;
+
+	ofs = File1.fptr;
+	const int SIZE = 512;
+
+	p1 = filesize[file_idx];
+	f_open(&File1, filename[file_idx], (uint8_t) 1);
+
+	while (p1)
+	{
+		/***Break when switching to another song**/
+		if(current != file_idx){
+			break;
+		}
+
+		if ((uint32_t) p1 >= SIZE){
+
+			cnt = SIZE;
+			p1 -= SIZE;
+		}
+		else
+		{
+			cnt = p1;
+			p1 = 0;
+		}
+		res = f_read(&File1, Buff, cnt, &cnt);
+		if (res != FR_OK)
+		{
+			break;
+		}
+
+		int j;
+		for (j = 0; j < cnt && (current == file_idx) && (state != STOP); j+=4) {
+
+			int converted_left = Buff[j] | Buff[j + 1] << 8;
+			int converted_right = Buff[j + 2] | Buff[j + 3] << 8;
+
+			int fifospace = alt_up_audio_write_fifo_space (audio_dev, ALT_UP_AUDIO_RIGHT);
+			if(fifospace > 0){
+				   alt_up_audio_write_fifo (audio_dev, &(converted_left), 1, ALT_UP_AUDIO_LEFT);
+				   alt_up_audio_write_fifo (audio_dev, &(converted_right), 1, ALT_UP_AUDIO_RIGHT);
+			}else{
+				j -= 4;
+			}
+
+			while(state == PAUSE){
+
+			}
+
+		}
+	}
+
+	state = STOP;
+
+}
+
+void button_ISR (void* context, alt_u32 id){
+
+	int button_state = IORD(BUTTON_PIO_BASE, 0);
+
+	switch(button_state){
+
+		case BUTTON_PREVIOUS:
+			printf("before: index = %d", file_idx);
+			file_idx == 0 ? file_idx = 12 : file_idx --;
+			printf("after: index = %d", file_idx);
+			display_song(fileorder[file_idx], filename[file_idx]);
+			printf("current state = %d", state);
+			break;
+		case BUTTON_STOP:
+			state = STOP;
+			printf("current state = %d", state);
+			break;
+		case BUTTON_PLAY_PAUSE:
+			if(state == PLAY){
+				state = PAUSE;
+			}else{
+				state = PLAY;
+			}
+			printf("current state = %d", state);
+			break;
+		case BUTTON_NEXT:
+			printf("before: index = %d", file_idx);
+			file_idx == 12 ? file_idx = 0 : file_idx ++;
+			printf("after: index = %d", file_idx);
+			display_song(fileorder[file_idx], filename[file_idx]);
+			printf("current state = %d", state);
+			break;
+
+	}
+
+	if(state != STOP){
+		play_song();
+	}
+
+
+	IOWR(BUTTON_PIO_BASE, 3, 0x0);
+
+}
+/***************************************************************************/
+/*  main                                                                   */
+/***************************************************************************/
+int main(void)
+{
+    file_idx = 0;
+
+    state = STOP; // stop in default
+    /**Enable interrupts and register ISR**/
+    alt_irq_register(BUTTON_PIO_IRQ, (void *) 0, button_ISR);
+	//enable interrupt for four buttons
+	IOWR(BUTTON_PIO_BASE, 2, 0xf);
+
+    /*****open the Audio port*****/
+    audio_dev = alt_up_audio_open_dev ("/dev/Audio");
+    if ( audio_dev == NULL)
+    	alt_printf ("Error: could not open audio device \n");
+    else
+    	alt_printf ("Opened audio device \n");
+
+    /*****Open lcd display*****/
+    lcd_display = fopen("/dev/lcd_display", "w");
+
+    /**Setup**/
+    (uint16_t) disk_initialize((uint8_t) 0); //di 0
+    f_mount((uint8_t) 0, &Fatfs[0]); //fi 0
+
+    generate_song_index();
+
+    /**Display the first song on LCD**/
+    display_song(fileorder[0], filename[0]);
+
+    while(1){};
+
+    /*
+     * This return here make no sense.
+     * But to prevent the compiler warning:
+     * "return type of 'main' is not 'int'
+     * we use an int as return :-)
+     */
+    return (0);
+}

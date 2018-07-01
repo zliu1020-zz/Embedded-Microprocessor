@@ -1,0 +1,54 @@
+/*
+ * "Hello World" example.
+ *
+ * This example prints 'Hello from Nios II' to the STDOUT stream. It runs on
+ * the Nios II 'standard', 'full_featured', 'fast', and 'low_cost' example
+ * designs. It runs with or without the MicroC/OS-II RTOS and requires a STDOUT
+ * device in your system's hardware.
+ * The memory footprint of this hosted application is ~69 kbytes by default
+ * using the standard reference design.
+ *
+ * For a reduced footprint version of this template, and an explanation of how
+ * to reduce the memory footprint for a given application, see the
+ * "small_hello_world" template.
+ *
+ */
+
+#include <stdio.h>
+#include "system.h"
+#include "sys/alt_irq.h"
+#include "altera_avalon_pio_regs.h"
+
+
+static void isr(void* context, alt_u32 id){
+	IOWR(LED_PIO_BASE, 0, 0xFF);
+	//IOWR(RESPONSE_OUT_BASE, something, data to write);
+
+	// Clear IRQ
+	//IOWR(STIMULUS_IN_BASE, ????, ????);
+}
+
+int main()
+{
+	printf("Hello from Nios II!\n");
+	alt_irq_register(STIMULUS_IN_IRQ, (void*) 0, isr);
+
+	// Enable Interrupt for stimulus
+	IOWR(STIMULUS_IN_BASE, 2, 0x1);
+
+	IOWR(EGM_BASE, 2, 700);
+	IOWR(EGM_BASE, 3, 350);
+	IOWR(EGM_BASE, 0, 1);
+
+	for(;;){
+		int busy = IORD(EGM_BASE, 1);
+
+		if (busy == 0) {
+			int latency = IORD(EGM_BASE, 4);
+			int missed_pulses = IORD(EGM_BASE, 5);
+			IOWR(EGM_BASE, 0, 0);
+		}
+	}
+
+	return 0;
+}
